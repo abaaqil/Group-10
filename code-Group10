@@ -1,0 +1,336 @@
+/* Project: Hand Washing Aid 
+ * This projects helps humans to wsh their hands properly
+ * When a user presses the start button, the system should turn on 
+ * a water faucet. The temperature of the water is continuously measured 
+ * and displayed so that the user is assured that it is at a sufficient
+ * temperature. A sensor should determine when the user places their hands 
+ * under the faucet. At that point,the display should begin counting down 
+ * seconds from 30 to 0. When the time is up, the display should indicate 
+ * that they have washed their hands sufficiently, and a green LED should light up.
+ * A fan should start at this point to allow the user to dry their hands. 
+ * The fan should run for 15 seconds. Finally, the fan should turn off and the 
+ * system should reset. Whenever the start button is pressed, the real time 
+ * clock module should be used to read the current time and transmit it to 
+ * the host computer over USB (using Serial.print).
+ * 
+ * If the user removes their hands before the 30 seconds is up, the system 
+ * should blink a warning light, put 30 seconds back on the display, 
+ * and wait for the user to put their hands under the water again before 
+ * restarting. If the user does not put their hands back under the water 
+ * within 10 seconds, the system should reset to its initial state 
+ * and wait for the start button to be pressed again.
+ */
+
+/* LCD 16x2 is used and is used in 4-bit mode
+ *  ARDUINO MEGA       LCD 16x2
+ *  D4                 DB4
+ *  D5                 DB5  
+ *  D6                 DB6
+ *  D7                 DB7
+ *  D8                 RS
+ *  D9                 EN
+ *  GND                R/W
+ */
+/* DS1307 RTC module interface
+ *  D20                SDA
+ *  D21                SCL
+ */
+
+/* Ultrasonic sensor HC-SR04 is used to detect hand
+ *  There is fixed distance between water Faucet and
+ *  sink, lets say 20cm. if we get less than 15cm 
+ *  it detects hand
+ *  D49          TIGGER PIN
+ *  D53          ECHO PIN
+ */
+
+ /* Servo motor is used to simulate water faucet
+  *  1000usec pulse means fauct is closed
+  *  2000usec pulse means faucet is opened
+  *  D13        servo signal
+  */
+ /* Tempeature Sensor
+  *  DHT11 is used to measure the temperature of water
+  *  as it is the only temperature sensor inculuded in
+  *  the kit
+  *  Adafruit DHT sensor library is used 
+  *  D11        Data
+  */
+ /* Fan is build using fan blade and 3~6v dc motor
+  *  Motor is powered up with 5V and a trasistor
+  *  is used as a switch to ON/OFF the fan 
+  *  D23       base of NPN2222
+  */
+
+ /* Push Button is used as user input 
+  * D12       Push Button 
+  */
+ /* LED 
+  *  two leds are used 
+  *  Green led   to indicate proper hand washing
+  *  Yellow led  to indicate warning
+  *  D24      Green Led
+  *  D25      Yellow Led
+  */
+
+#include "LiquidCrystal.h"
+#include <Wire.h>
+#include <Servo.h>
+#include <DHT.h>
+
+#define DS1307_ADDRESS 0x68
+#define TRG_PIN  49
+#define ECO_PIN  53
+#define FAN      23 
+#define BTN      12
+#define LEDG     24
+#define LEDY     25
+#define DHTPIN   11
+#define DHTTYPE DHT11   // DHT 11
+
+#define FAN_ON()       PORTA |=  (1 << PA1)
+#define FAN_OFF()      PORTA &= ~(1 << PA1) 
+
+#define LED_GRN_ON()   PORTA |=  (1 << PA2)
+#define LED_GRN_OFF()  PORTA &= ~(1 << PA2) 
+
+#define LED_YLO_ON()   PORTA |=  (1 << PA3)
+#define LED_YLO_OFF()  PORTA &= ~(1 << PA3) 
+#define LED_YLO_TGL()  PINA   =  (1 << PA3)
+
+
+// initialize the library by providing the nuber of pins to it
+LiquidCrystal lcd(8,9,4,5,6,7);
+Servo faucet;   // creat servo object
+DHT dht(DHTPIN, DHTTYPE);
+
+
+void InitLcd(void);
+void PrintLCD(void);
+void InitRTC(void);
+unsigned char DecToBcd(unsigned char val);
+unsigned char BcdToDec(unsigned char val);
+
+bool Check30SecUpWash(void);
+bool CheckFor10Sec(void);
+
+bool DetectHand(void);
+void SndTimeToPC(void);
+
+
+unsigned char hr, mnt, sec;
+unsigned char cntDnTmr;
+int tmpr;
+
+void setup() 
+{
+Wire.begin();
+Serial.begin(115200);
+faucet.attach(13); // attach pin 13 with servo object
+faucet.writeMicroseconds(1000);  // close faucet 
+
+pinMode(TRG_PIN, OUTPUT);  // 
+pinMode(ECO_PIN, INPUT);
+pinMode(FAN, OUTPUT);    
+pinMode(LEDG,OUTPUT);
+pinMode(LEDY,OUTPUT);
+pinMode(BTN, INPUT_PULLUP);
+InitLcd();
+InitRTC();  
+dht.begin();
+cntDnTmr = 0;
+}
+
+void loop() 
+{
+bool handDtctFlg;
+bool washFlg;
+bool flg;
+
+   if (LOW == digitalRead(BTN)) //Button is pressed
+   {
+   ReadTime(sec,mnt,hr);             // Read time from RTC module
+   SndTimeToPC();                    // send current time to host PC
+   
+   tmpr = dht.readTemperature();     // Read Water Temperature
+                                     // takes around 250msec
+   PrintLCD();                       // Print Temp and time count on LCD Line 1                                     
+   handDtctFlg = DetectHand();       // true if hand is detected
+   washFlg = false;
+   if (handDtctFlg)
+      {
+      cntDnTmr = 30;
+      while (false == washFlg)
+         {
+         faucet.writeMicroseconds(2000);   // Turn ON Faucet
+         washFlg = Check30SecUpWash();
+         faucet.writeMicroseconds(1000);   // Turn OFF Faucet 
+         if (washFlg) LED_GRN_ON();
+         else
+            {
+            cntDnTmr = 30;
+            PrintLCD();
+            flg = CheckFor10Sec();  
+            }   
+         if (false == flg) {cntDnTmr = 0; break;} 
+         }
+      }
+   if (washFlg == true) 
+      { 
+      lcd.setCursor(0,1); // set cusor position to start of next line
+      lcd.print("   FAN IS ON    ");
+      FAN_ON(); 
+      delay(15000);  // 15sec
+      FAN_OFF();
+      LED_GRN_OFF();
+      }
+   lcd.setCursor(0,1); // set cusor position to start of next line
+   lcd.print("  PRESS BUTTON  ");
+   }
+        
+}
+
+bool Check30SecUpWash(void)
+{
+unsigned long stTime;
+bool handDtctFlg;
+
+   stTime = millis();
+   while (cntDnTmr)
+      {
+      if ((millis() - stTime) >= 1000)
+         {
+         stTime = millis();
+         tmpr = dht.readTemperature();
+         PrintLCD();
+         handDtctFlg = DetectHand();
+         cntDnTmr--;
+         }
+      if(false == handDtctFlg) break;
+      }
+   if (0 == cntDnTmr)   return (true);
+   else                 return (false);
+}
+
+bool CheckFor10Sec(void)
+{
+unsigned char cntX;
+unsigned long stTime;
+bool handDtctFlg;
+
+   cntX = 20;
+   stTime = millis();
+   while (cntX)
+      {
+      if ((millis() - stTime) > 500)   // 500msc 
+         { 
+         stTime = millis();
+         LED_YLO_TGL();       // Toggle warning light
+         handDtctFlg = DetectHand();
+         cntX--;
+         }
+      if (handDtctFlg) break;
+      }
+   LED_YLO_OFF();
+   if (cntX)   return(true);
+   else        return(false);  
+}
+
+bool DetectHand(void)
+{
+unsigned long duration;
+int distance;
+  
+   digitalWrite(TRG_PIN, LOW); // Clears the trigPin
+   delayMicroseconds(2);
+   digitalWrite(TRG_PIN, HIGH);// Set trigPin HIGH for 10us
+   delayMicroseconds(10);
+   digitalWrite(TRG_PIN, LOW);
+   duration = pulseInLong(ECO_PIN, HIGH); // Reads the echoPin, time in us
+   distance= duration*0.034/2; // Calculating the distance in cm
+
+   if (distance < 15) return (true);
+   else               return (false);
+}
+
+void SndTimeToPC(void)
+{
+   Serial.print(hr);
+   Serial.print(":");
+   Serial.print(mnt);
+   Serial.print(":");
+   Serial.println(sec);
+}
+void InitLcd(void)
+{
+   lcd.begin(16,2);
+   lcd.clear();
+   lcd.setCursor(0,0); // set cursor position to start of first line on the LCD
+   lcd.print(" HAND WASH AID  "); 
+   lcd.setCursor(0,1); // set cusor position to start of next line
+   lcd.print("  PRESS BUTTON  ");
+}
+
+// prints temperature and count down value in line 2;
+void PrintLCD(void)
+{
+int t;
+
+   lcd.setCursor(0,1); // set cusor position to start of next line
+   t = tmpr;
+   if (t < 0)  t = 0;
+   if (t > 99) t = 99;
+   lcd.print("Tmp: ");  lcd.print(t); lcd.print("C");
+   lcd.setCursor(8,1);
+   lcd.print(" Cnt: ");  lcd.print(cntDnTmr);
+}
+
+void InitRTC(void)
+{
+unsigned char weekDay, monthDay, month, year;
+
+// here you can set time and date before burning the code
+
+   sec  = 0;      // 0~59
+   mnt  = 0;      // 0~59
+   hr   = 10;     // 0~23
+   weekDay = 2;   // 1~7
+   monthDay = 1;  // 1~31
+   month    = 1;  // 1~12
+   year     = 21; // 0~99
+   
+   Wire.beginTransmission(DS1307_ADDRESS);
+   Wire.write(0x00); 
+
+   Wire.write(DecToBcd(sec));
+   Wire.write(DecToBcd(mnt));
+   Wire.write(DecToBcd(hr));
+   Wire.write(DecToBcd(weekDay));
+   Wire.write(DecToBcd(monthDay));
+   Wire.write(DecToBcd(month));
+   Wire.write(DecToBcd(year));
+
+   Wire.endTransmission();
+}
+void ReadTime(byte *SEC, byte *MIN, byte *HOUR)
+{
+   Wire.beginTransmission(DS1307_ADDRESS);
+   Wire.write(0); 
+   Wire.endTransmission();
+   Wire.requestFrom(DS1307_ADDRESS, 7);
+     
+   *SEC   = BcdToDec(Wire.read()&0x7f);
+   *MIN   = BcdToDec(Wire.read());
+   *HOUR  = BcdToDec(Wire.read()&0x3f);
+}
+unsigned char DecToBcd(unsigned char val)
+{
+// Convert normal decimal numbers to binary coded decimal
+  return ( (val/10*16) + (val%10) );
+}
+
+unsigned char BcdToDec(unsigned char val)  
+{
+// Convert binary coded decimal to normal decimal numbers
+  return ( (val/16*10) + (val%16) );
+}
